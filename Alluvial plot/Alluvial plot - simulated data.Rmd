@@ -1,0 +1,155 @@
+---
+title: "Alluvial plot"
+author: "Tessa Concepcion"
+date: "October 8, 2025"
+output:
+  html_document:
+    theme: journal
+    toc: true
+    toc_float: true
+    toc_depth: 2
+fontsize: 11pt
+geometry: margin=0.5in
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+
+library(ggplot2)
+library(tidyverse)
+library(ggalluvial)
+
+setwd("/Users/tconcepc/Library/CloudStorage/OneDrive-St.JudeChildren\'sResearchHospital/GitHub/figure-code/Alluvial\ plot")
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+nicecolors <- c("#4B2E83", "#A13482", "#DE4F72", "#FF815E", "#FFBC56",  "#F9F871", "#7F7F7F")
+
+```
+
+# Simulating data
+
+```{r Create dataset}
+
+set.seed(143) 
+
+n_ptid <- 500
+n_visits <- 5
+statuses <- c("A", "B", "C")
+
+data_sim <- data.frame(
+  ptid = rep(1:n_ptid, each = n_visits),
+  visit = rep(1:n_visits, times = n_ptid),
+  status = NA
+)
+
+# Simulate status for each ptid
+for (ptid in 1:n_ptid) {
+  current_status <- sample(statuses, 1)
+  for (visit in 1:n_visits) {
+    idx <- (ptid - 1) * n_visits + visit
+    data_sim$status[idx] <- current_status
+    
+    # For follow-up visits, status is...
+    if (visit < n_visits) {
+      if (runif(1) < 0.8) {
+        # Stay in same status
+        next_status <- current_status
+      } else {
+        # Switch to one of the other statuses
+        next_status <- sample(statuses[statuses != current_status], 1)
+      }
+      current_status <- next_status
+    } } }
+
+
+```
+
+This code is to space the alluvial strata based on their actual time values, rather than evenly spaced apart. Update actual time values accordingly, or ignore if not relevant
+
+```{r Numerical time}
+
+data_sim <- data_sim %>%
+  mutate(time_num = case_when(
+    visit == 1 ~ 0,  # 0 weeks
+    visit == 2 ~ 6,  # 6 weeks 
+    visit == 3 ~ 14, # 14 weeks 
+    visit == 4 ~ 20, # 20 weeks
+    visit == 5 ~ 26  # 26 weeks
+    ))
+
+```
+
+```{r Creating strata labels for plot}
+
+label <- data_sim %>% group_by(visit, status) %>% tally() %>% mutate(perc = paste0(sprintf("%.1f", 100 * n / sum(n)),"%"))
+data_sim <- left_join(data_sim, label, by=c("visit", "status"))
+
+```
+
+Creating flow proportions (e.g. what proportion of Status A at time 1 moves to Status B at time 2?)
+
+```{r Creating flow labels for plot}
+
+flows <- data_sim %>% group_by(ptid) %>% mutate(visit_prev = lag(visit), status_prev = lag(status)) %>% ungroup() %>% # Creating a visit lag
+  filter(!is.na(visit_prev)) %>% # Only transitions, not first visit
+  group_by(visit_prev, visit, status_prev, status) %>% tally(name = "numer") %>% # Numerator of flow, what number moved from A to B?
+  left_join(data_sim %>% group_by(visit, status) %>% tally(name = "denom") %>% filter(visit != max(data_sim$visit)), # Denominator of flow, what number were in A to begin with?
+            by = c("visit_prev" = "visit", "status_prev" = "status")) %>%
+  mutate(perc = sprintf("%.2f", numer / denom)) %>% # Proportion (numerator / denominator)
+  # The following code is providing a y-axis location to put the proportion label, in the subsequent alluvial plot
+  group_by(visit_prev) %>% arrange(desc(status_prev), desc(status)) %>%
+  mutate(y_end = cumsum(numer), y_start = lag(y_end, default = 0), y = (y_start + y_end) / 2) %>%
+  ungroup() %>% filter(visit == visit_prev + 1) %>% # Only consecutive visits
+  left_join(data_sim %>% select(visit, time_num) %>% distinct(), # If no time_num, remove that variable
+            by = c("visit_prev" = "visit"))
+
+```
+
+# Plotting flows
+
+## Evenly spaced strata
+
+```{r Plot 1, fig.width=10, fig.height=5}
+
+ggplot(data_sim, aes(x = visit, stratum = status, alluvium = ptid, y = 1, fill = status, color = status)) +
+  geom_flow(width = .4, show.legend = F) +
+  geom_stratum(width = .4, color = "black", show.legend = T) +
+  geom_label(stat = "stratum", aes(label = perc), color="white", show.legend = F, linewidth = NA)+
+  scale_x_continuous(breaks = sort(unique(data_sim$visit)),
+                     labels = c("0 weeks", "6 weeks", "14 weeks", "20 weeks", "26 weeks"), 
+                     expand = c(0.05, 0.05))+
+  scale_fill_manual(values=nicecolors)+
+  scale_color_manual(values=nicecolors)+
+  labs(x = "", y = "Count", fill = "Status", color="Status",
+       caption = "Sample sizes may differ across strata due to missed visits") +
+  geom_text(data = flows, aes(x = visit-0.7, y = y, label = perc),
+            inherit.aes = FALSE, size=3)+
+  theme_minimal()+
+  theme(legend.position = "bottom")
+
+```
+
+
+## Strata based on numerical time
+
+```{r Plot 2, fig.width=10, fig.height=5}
+
+ggplot(data_sim, aes(x = time_num, stratum = status, alluvium = ptid, y = 1, fill = status, color = status)) +
+  geom_flow(width = 2, show.legend = F) +
+  geom_stratum(width = 2, color = "black", show.legend = T) +
+  geom_label(stat = "stratum", aes(label = perc), color="white", show.legend = F, linewidth = NA)+
+  scale_x_continuous(breaks = sort(unique(data_sim$time_num)),
+                     labels = c("0 weeks", "6 weeks", "14 weeks", "20 weeks", "26 weeks"), 
+                     expand = c(0.05, 0.05))+
+  scale_fill_manual(values=nicecolors)+
+  scale_color_manual(values=nicecolors)+
+  labs(x = "", y = "Count", fill = "Status", color="Status",
+       caption = "Sample sizes may differ across strata due to missed visits") +
+  geom_text(data = flows, aes(x = time_num + 1.5, y = y, label = perc),
+            inherit.aes = FALSE, size=3)+
+  theme_minimal()+
+  theme(legend.position = "bottom")
+
+```
+

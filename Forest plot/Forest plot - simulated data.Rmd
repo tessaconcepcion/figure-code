@@ -1,0 +1,149 @@
+---
+title: "Forest plot"
+author: "Tessa Concepcion"
+date: "October 8, 2025"
+output:
+  html_document:
+    theme: journal
+    toc: true
+    toc_float: true
+    toc_depth: 2
+fontsize: 11pt
+geometry: margin=0.5in
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup}
+rm(list = ls())
+
+library(ggplot2)     #for plots
+library(tidyverse)   #for everything
+library(kableExtra)
+library(broom)
+
+setwd("/Users/tconcepc/Library/CloudStorage/OneDrive-St.JudeChildren\'sResearchHospital/GitHub/figure-code/Alluvial\ plot")
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+nicecolors <- c("#4B2E83", "#A13482", "#DE4F72", "#FF815E", "#FFBC56",  "#F9F871", "#7F7F7F")
+options(scipen=999)
+
+```
+
+# Simulating data
+
+```{r Simulate data}
+
+set.seed(143) 
+
+n <- 1000
+
+# Create data frame
+data_sim <- data.frame(
+  age         = sample(c("0-5", "6-10", "11-15"), n, replace = TRUE, prob = c(0.3, 0.5, 0.2)),
+  gender      = sample(c("male", "female"), n, replace = TRUE),
+  hospital    = sample(c("AAA", "BBB", "CCC"), n, replace = TRUE),
+  comorbidity = sample(c("none", "mild", "severe"), n, replace = TRUE, prob = c(0.4, 0.4, 0.2)),
+  insurance   = sample(c("public", "private", "none"), n, replace = TRUE, prob = c(0.5, 0.4, 0.1)),
+  admission   = sample(c("emergency", "elective", "urgent"), n, replace = TRUE, prob = c(0.6, 0.3, 0.1))
+  )
+
+# Simulate mortality outcome based on some predictors (using a linear predictor for realism)
+data_sim <- data_sim %>% 
+  mutate(lp = -2 +
+           0.5 * (age == "old") +
+           0.3 * (gender == "male") +
+           0.4 * (hospital == "CCC") +
+           0.6 * (comorbidity == "severe") +
+           0.2 * (insurance == "none") +
+           0.3 * (admission == "emergency"),
+         mortality = rbinom(n, 1, plogis(lp)))
+
+```
+
+# Running logistic regression models
+
+```{r Loop logistic regression}
+
+covars <- c("age", "gender", "hospital", "comorbidity", "insurance", "admission")
+results_list <- list()
+
+for (v in covars) {
+  model_formula <- as.formula(paste("mortality ~", v))
+  mod <- glm(model_formula, data = data_sim, family = binomial)
+  results <- tidy(mod, exponentiate = TRUE, conf.int = TRUE)
+  results <- results %>% filter(term != "(Intercept)") %>%
+    mutate(variable = v,
+           level = gsub(paste0(v), "", term),
+           level = gsub("^", "", level)) %>%
+    select(variable, level, or = estimate, lowerci = conf.low, upperci = conf.high, pvalue = p.value)
+
+  results_list[[v]] <- results
+}
+
+results <- bind_rows(results_list)
+
+levels_list <- lapply(covars, function(var) unique(data_sim[[var]]))
+names(levels_list) <- covars
+
+ref_df <- lapply(names(levels_list), function(var) {
+  model_levels <- gsub(paste0(var), "", results$level[results$variable == var])
+  ref_level <- setdiff(levels_list[[var]], model_levels)
+  data.frame(variable = var, ref = ref_level, stringsAsFactors = FALSE)
+}) %>% bind_rows()
+
+results <- results %>%
+  left_join(ref_df, by = "variable") %>%
+  mutate(variable_ref = paste0(variable, "\n(ref: ", ref, ")"))
+
+results %>% select(variable_ref, level, or, lowerci, upperci, pvalue) %>% kable()
+
+```
+
+# Plotting logistic regression results
+
+```{r Forest plot, fig.width=10, fig.height=5}
+
+# Create custom breaks for x-axis
+n_breaks <- 10  # Adjust n for how many breaks you want on each side of the x axis
+OR_breaks <- c(2^(-n_breaks:-1), 1, 2^(1:n_breaks))
+OR_range <- range(OR_breaks, na.rm = TRUE)
+sig_labels <- c("Non-significant", "Significant (α < 0.05)")
+
+results %>% mutate(sig = ifelse(pvalue < 0.05, "sig", "nonsig"),
+                   lowerci = round(lowerci, 1),
+                   upperci = round(upperci, 1),
+                   variable = factor(variable, levels = unique(variable))) %>% # Keep things in the same order
+  filter(or >= min(OR_range) & or <= max(OR_range)) %>% # Removing variables that have crazy wide OR
+  ggplot(aes(x = or, xmin = lowerci, xmax = upperci,
+             y = factor(level, levels = rev(unique(level))),
+             color = factor(sig), shape = factor(sig))) +
+  geom_pointrange(size = 0.5) +
+  geom_point(size = 3) +
+  geom_vline(xintercept = 1, lty = 2) +
+  geom_text(aes(label = ifelse(sig == "sig", sprintf("%.2f (%.2f–%.2f)", or, lowerci, upperci), "")),
+            vjust = -1, size = 3, color = "black") +
+  scale_shape_manual(values = c(1, 16), label = sig_labels) +  # Closed circle for significant (16), open circle for not significant (1)
+  scale_color_manual(values = c("grey", "black"), label = sig_labels) +
+  scale_x_continuous(
+    trans = 'log',  # Apply natural log transformation
+    breaks = OR_breaks,  # Define breaks
+    labels = function(x) {sapply(x, function(val) { # making no trailing 0s in the axis labels
+      formatted <- format(val, scientific = FALSE)
+      sub("\\.0*$", "", formatted)})}) +
+  facet_grid(variable_ref~., scales="free_y", switch="y", space="free_y") +
+  theme_classic() +
+  labs(x = "Odds Ratio (OR)", y = "", color = "", shape = "") +
+  theme(legend.position = "bottom",
+        legend.direction = "vertical",
+        legend.title = element_blank(),
+        legend.spacing.y = unit(0, "mm"), 
+        legend.background = element_blank(),
+        legend.box.background = element_rect(colour = "black"),
+        axis.text.x = element_text(angle = 0, hjust = 0.5),
+        strip.background = element_rect(fill = "white", color = NA),
+        strip.placement = "outside",
+        strip.text.y.left = element_text(face = "bold", color = "black", angle = 0, hjust = 0.5, vjust = 1))
+
+```
+
+
